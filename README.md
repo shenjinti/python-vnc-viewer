@@ -83,7 +83,7 @@ even that it does what it says to do ;-)
 
 Changes:
 --------
-2020.04.15 - new version for python3.x (replace twisted with asyncio, pygame with sdl2)
+2020.04.15 - new version for python3.x (replace twisted with asyncio, pygame with sdl2)   
 2015.08.29 - expored to Github
 2009.12.14 - 4. another update
  * replaced crippled_des.py with pyDes

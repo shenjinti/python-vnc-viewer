@@ -106,7 +106,7 @@ class RFBClient(asyncio.Protocol):
         self.transport = None
         self._packet = b''
         self._handler = self._handleInitial
-
+        self._already_expecting = False
     # ------------------------------------------------------
     # states used on connection startup
     # ------------------------------------------------------
@@ -186,7 +186,7 @@ class RFBClient(asyncio.Protocol):
          self.redmax, self.greenmax, self.bluemax,
          self.redshift, self.greenshift, self.blueshift) = \
             unpack("!BBBBHHHBBBxxx", pixformat)
-        self.bypp = self.bpp / 8  # calc bytes per pixel
+        self.bypp = int(self.bpp / 8)  # calc bytes per pixel
         self.expect(self._handleServerName, namelen)
 
     def _handleServerName(self, block):
@@ -235,8 +235,7 @@ class RFBClient(asyncio.Protocol):
                 self.expect(self._handleDecodeRAW, width *
                             height*self.bypp, x, y, width, height)
             elif encoding == HEXTILE_ENCODING:
-                self._doNextHextileSubrect(
-                    None, None, x, y, width, height, None, None)
+                self._doNextHextileSubrect(None, None, x, y, width, height, None, None)
             elif encoding == CORRE_ENCODING:
                 self.expect(self._handleDecodeCORRE, 4 +
                             self.bypp, x, y, width, height)
@@ -315,16 +314,16 @@ class RFBClient(asyncio.Protocol):
         self._doConnection()
 
     # ---  Hexile Encoding
-
+    
     def _doNextHextileSubrect(self, bg, color, x, y, width, height, tx, ty):
-        # ~ print "_doNextHextileSubrect %r" % ((color, x, y, width, height, tx, ty), )
-        # coords of next tile
-        # its line after line of tiles
-        # finished when the last line is completly received
-
-        # dont inc the first time
+        #~ print "_doNextHextileSubrect %r" % ((color, x, y, width, height, tx, ty), )
+        #coords of next tile
+        #its line after line of tiles
+        #finished when the last line is completly received
+        
+        #dont inc the first time
         if tx is not None:
-            # calc next subrect pos
+            #calc next subrect pos
             tx += 16
             if tx >= x + width:
                 tx = x
@@ -332,70 +331,63 @@ class RFBClient(asyncio.Protocol):
         else:
             tx = x
             ty = y
-        # more tiles?
+        #more tiles?
         if ty >= y + height:
             self._doConnection()
         else:
-            self.expect(self._handleDecodeHextile, 1, bg,
-                        color, x, y, width, height, tx, ty)
-
+            self.expect(self._handleDecodeHextile, 1, bg, color, x, y, width, height, tx, ty)
+        
     def _handleDecodeHextile(self, block, bg, color, x, y, width, height, tx, ty):
         (subencoding,) = unpack("!B", block)
-        # calc tile size
+        #calc tile size
         tw = th = 16
-        if x + width - tx < 16:
-            tw = x + width - tx
-        if y + height - ty < 16:
-            th = y + height - ty
-        # decode tile
-        if subencoding & 1:  # RAW
-            self.expect(self._handleDecodeHextileRAW, tw*th*self.bypp,
-                        bg, color, x, y, width, height, tx, ty, tw, th)
+        if x + width - tx < 16:   tw = x + width - tx
+        if y + height - ty < 16:  th = y + height- ty
+        #decode tile
+        if subencoding & 1:     #RAW
+            self.expect(self._handleDecodeHextileRAW, tw*th*self.bypp, bg, color, x, y, width, height, tx, ty, tw, th)
         else:
             numbytes = 0
-            if subencoding & 2:  # BackgroundSpecified
+            if subencoding & 2:     #BackgroundSpecified
                 numbytes += self.bypp
-            if subencoding & 4:  # ForegroundSpecified
+            if subencoding & 4:     #ForegroundSpecified
                 numbytes += self.bypp
-            if subencoding & 8:  # AnySubrects
+            if subencoding & 8:     #AnySubrects
                 numbytes += 1
             if numbytes:
-                self.expect(self._handleDecodeHextileSubrect, numbytes,
-                            subencoding, bg, color, x, y, width, height, tx, ty, tw, th)
+                self.expect(self._handleDecodeHextileSubrect, numbytes, subencoding, bg, color, x, y, width, height, tx, ty, tw, th)
             else:
                 self.fillRectangle(tx, ty, tw, th, bg)
-                self._doNextHextileSubrect(
-                    bg, color, x, y, width, height, tx, ty)
-
+                self._doNextHextileSubrect(bg, color, x, y, width, height, tx, ty)
+    
     def _handleDecodeHextileSubrect(self, block, subencoding, bg, color, x, y, width, height, tx, ty, tw, th):
         subrects = 0
         pos = 0
-        if subencoding & 2:  # BackgroundSpecified
+        if subencoding & 2:     #BackgroundSpecified
             bg = block[:self.bypp]
             pos += self.bypp
         self.fillRectangle(tx, ty, tw, th, bg)
-        if subencoding & 4:  # ForegroundSpecified
+        if subencoding & 4:     #ForegroundSpecified
             color = block[pos:pos+self.bypp]
             pos += self.bypp
-        if subencoding & 8:  # AnySubrects
-            # ~ (subrects, ) = unpack("!B", block)
-            subrects = ord(block[pos])
-        # ~ print subrects
+        if subencoding & 8:     #AnySubrects
+            #~ (subrects, ) = unpack("!B", block)
+            subrects = block[pos]
+        #~ print subrects
         if subrects:
-            if subencoding & 16:  # SubrectsColoured
-                self.expect(self._handleDecodeHextileSubrectsColoured, (self.bypp + 2)
-                            * subrects, bg, color, subrects, x, y, width, height, tx, ty, tw, th)
+            if subencoding & 16:    #SubrectsColoured
+                self.expect(self._handleDecodeHextileSubrectsColoured, (self.bypp + 2)*subrects, bg, color, subrects, x, y, width, height, tx, ty, tw, th)
             else:
-                self.expect(self._handleDecodeHextileSubrectsFG, 2*subrects,
-                            bg, color, subrects, x, y, width, height, tx, ty, tw, th)
+                self.expect(self._handleDecodeHextileSubrectsFG, 2*subrects, bg, color, subrects, x, y, width, height, tx, ty, tw, th)
         else:
             self._doNextHextileSubrect(bg, color, x, y, width, height, tx, ty)
-
+    
+    
     def _handleDecodeHextileRAW(self, block, bg, color, x, y, width, height, tx, ty, tw, th):
         """the tile is in raw encoding"""
         self.updateRectangle(tx, ty, tw, th, block)
         self._doNextHextileSubrect(bg, color, x, y, width, height, tx, ty)
-
+    
     def _handleDecodeHextileSubrectsColoured(self, block, bg, color, subrects, x, y, width, height, tx, ty, tw, th):
         """subrects with their own color"""
         sz = self.bypp + 2
@@ -404,8 +396,8 @@ class RFBClient(asyncio.Protocol):
         while pos < end:
             pos2 = pos + self.bypp
             color = block[pos:pos2]
-            xy = ord(block[pos2])
-            wh = ord(block[pos2+1])
+            xy = block[pos2]
+            wh = block[pos2+1]
             sx = xy >> 4
             sy = xy & 0xf
             sw = (wh >> 4) + 1
@@ -413,14 +405,14 @@ class RFBClient(asyncio.Protocol):
             self.fillRectangle(tx + sx, ty + sy, sw, sh, color)
             pos += sz
         self._doNextHextileSubrect(bg, color, x, y, width, height, tx, ty)
-
+    
     def _handleDecodeHextileSubrectsFG(self, block, bg, color, subrects, x, y, width, height, tx, ty, tw, th):
         """all subrect with same color"""
         pos = 0
         end = len(block)
         while pos < end:
-            xy = ord(block[pos])
-            wh = ord(block[pos+1])
+            xy = block[pos]
+            wh = block[pos+1]
             sx = xy >> 4
             sy = xy & 0xf
             sw = (wh >> 4) + 1
@@ -452,20 +444,26 @@ class RFBClient(asyncio.Protocol):
         self._packet += data
         self._handler()
 
-    def _handleExpected(self):
-        if len(self._packet) < self._expected_len:
-            return
-        block = self._packet[:self._expected_len]
-        self._packet = self._packet[self._expected_len:]
-        self._expected_len = 0
-        self._expected_handler(block, *self._expected_args, **self._expected_kwargs)
+    def _handleExpected(self):        
+        while True:
+            if len(self._packet) < self._expected_len:
+                break
+
+            block = self._packet[:self._expected_len]
+            self._packet = self._packet[self._expected_len:]
+            self._expected_len = 0
+            self._already_expecting = True
+            self._expected_handler(block, *self._expected_args, **self._expected_kwargs)
+
+        self._already_expecting = False
 
     def expect(self, handler, size, *args, **kwargs):
         self._expected_handler = handler
         self._expected_len = int(size)
         self._expected_args = args
         self._expected_kwargs = kwargs
-        self._handleExpected()  # just in case that there is already enough data
+        if self._already_expecting is False:
+            self._handleExpected()  # just in case that there is already enough data
 
     # ------------------------------------------------------
     # client -> server messages
@@ -479,7 +477,7 @@ class RFBClient(asyncio.Protocol):
         self.bpp, self.depth, self.bigendian, self.truecolor = bpp, depth, bigendian, truecolor
         self.redmax, self.greenmax, self.bluemax = redmax, greenmax, bluemax
         self.redshift, self.greenshift, self.blueshift = redshift, greenshift, blueshift
-        self.bypp = self.bpp / 8  # calc bytes per pixel
+        self.bypp = int(self.bpp / 8)  # calc bytes per pixel
         # ~ print self.bypp
 
     def setEncodings(self, list_of_encodings):
@@ -599,7 +597,8 @@ async def test_main():
 
     class TestClient(RFBClient):
         def vncConnectionMade(self):
-            print("Screen format: depth=%d bytes_per_pixel=%r" % (self.depth, self.bpp))
+            print("Screen format: depth=%d bytes_per_pixel=%r" %
+                  (self.depth, self.bpp))
             print("Desktop name: %r" % self.name)
             self.setEncodings([RAW_ENCODING])
             self.framebufferUpdateRequest()

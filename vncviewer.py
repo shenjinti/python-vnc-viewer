@@ -12,6 +12,7 @@ import sdl2.ext
 import time
 import asyncio
 import ctypes
+import struct
 
 from sdl2 import render, rect, surface
 
@@ -22,6 +23,13 @@ class Option:
         self.port = 5900
         self.width = 1280
         self.height = 1024
+        self.encoding = [
+            rfb.RAW_ENCODING,
+            rfb.HEXTILE_ENCODING,
+            rfb.COPY_RECTANGLE_ENCODING,
+            rfb.CORRE_ENCODING,
+            rfb.RRE_ENCODING,
+        ]
 
     def remote_url(self):
         return 'vnc://%s:%s' % (self.host, self.port)
@@ -29,11 +37,12 @@ class Option:
 
 EV_RESIZE = 0
 EV_UPDATE_RECT = 1
-EV_COPY_RECT = 1
+EV_COPY_RECT = 2
+EV_FILL_RECT = 3
 
 
 class VNCClient(rfb.RFBClient):
-    def __init__(self, loop, option, renderer):
+    def __init__(self, loop, renderer, option):
         rfb.RFBClient.__init__(self, loop)
         self.loop = loop
         self.option = option
@@ -45,16 +54,9 @@ class VNCClient(rfb.RFBClient):
         print("Screen format: depth=%d bytes_per_pixel=%r width=%d height=%d" %
               (self.depth, self.bpp, self.width, self.height))
         print("Desktop name: %r" % self.name)
-        encoding = [rfb.RAW_ENCODING,
-                    rfb.COPY_RECTANGLE_ENCODING,
-                    rfb.HEXTILE_ENCODING,
-                    rfb.CORRE_ENCODING,
-                    rfb.RRE_ENCODING
-                    ]
 
-        self.setEncodings(encoding)
+        self.setEncodings(self.option.encoding)
         self.framebufferUpdateRequest()
-
         self._events.append((EV_RESIZE, (self.width, self.height)))
 
     def updateRectangle(self, x, y, width, height, data):
@@ -65,20 +67,23 @@ class VNCClient(rfb.RFBClient):
         port.y = y
         port.w = width
         port.h = height
-        #self._frames.append()
-        self._events.append((EV_UPDATE_RECT, (port, data, int(port.w * self.bpp / 8))))
-
-
+        pitch = int(port.w * self.bpp / 8)
+        self._events.append((EV_UPDATE_RECT, (port, data, pitch)))
 
     def copyRectangle(self, srcx, srcy, x, y, width, height):
         """used for copyrect encoding. copy the given rectangle
            (src, srxy, width, height) to the target coords (x,y)"""
         #print("copyRectangle", srcx, srcy, x, y, width, height)
         self._events.append((EV_COPY_RECT, (srcx, srcy, x, y, width, height)))
+
     def fillRectangle(self, x, y, width, height, color):
         """fill rectangle with one color"""
         #~ remoteframebuffer.CopyRect(srcx, srcy, x, y, width, height)
-        print('fillRectangle', x, y, width, height, color)
+        #print('==========fillRectangle', x, y, width, height, color)
+
+        port = (x, y, width, height)
+        r, g, b, a = struct.unpack("!BBBB", color)
+        self._events.append((EV_FILL_RECT, (port, sdl2.ext.Color(r, g, b, a))))
 
     def commitUpdate(self, rectangles=None):
         """called after a series of updateRectangle(), copyRectangle()
@@ -92,7 +97,7 @@ class VNCClient(rfb.RFBClient):
     def nextEvents(self):
         if len(self._events) <= 0:
             return []
-        evs = self._events[::]
+        evs = self._events
         self._events = []
         return evs
 
@@ -102,41 +107,53 @@ def load_gui(option):
     window = sdl2.ext.Window("VNC Viewer [%s]" % (option.remote_url()), size=(
         option.width, option.height))
     window.show()
-    sdl2.SDL_ShowCursor(0)
-    renderer = render.SDL_CreateRenderer(window.window, -1, 0)
-    render.SDL_RenderClear(renderer)
-    render.SDL_RenderPresent(renderer)
-
-    return window, renderer
+    return window
 
 
 async def run_gui(window, renderer, client):
     running = True
-    texture = None
-    vport = rect.SDL_Rect()
+    in_present = False
     buttons = 0
+
+    renderer.clear()
+    sdl2.SDL_ShowCursor(0)
+
+    factory = sdl2.ext.SpriteFactory(sdl2.ext.TEXTURE, renderer=renderer)
+    pformat = sdl2.pixels.SDL_AllocFormat(sdl2.pixels.SDL_PIXELFORMAT_RGB888)
 
     while running:
         evs = client.nextEvents()
         need_update = len(evs) > 0
         for ev in evs:
             if ev[0] == EV_RESIZE:
-                texture = render.SDL_CreateTexture(renderer,
-                                                   sdl2.pixels.SDL_PIXELFORMAT_RGB888,
-                                                   render.SDL_TEXTUREACCESS_STREAMING,
-                                                   ev[1][0], ev[1][1])
-                vport.x = 0
-                vport.y = 0
-                vport.w, vport.h = ev[1]
-            elif ev[0] == EV_UPDATE_RECT and texture is not None:
+                pass
+            elif ev[0] == EV_UPDATE_RECT:
                 port, buf, pitch = ev[1]
-                render.SDL_UpdateTexture(texture, port, buf, pitch)
-            elif ev[0] == EV_COPY_RECT and texture is not None:
+                texture = factory.create_texture_sprite(
+                    renderer, (port.w, port.h),
+                    pformat=sdl2.pixels.SDL_PIXELFORMAT_RGB888,
+                    access=render.SDL_TEXTUREACCESS_STREAMING)
+                tport = sdl2.SDL_Rect()
+                tport.x = 0
+                tport.y = 0
+                tport.w = port.w
+                tport.h = port.h
+                render.SDL_UpdateTexture(texture.texture, tport, buf, pitch)
+                renderer.copy(texture, (0, 0, port.w, port.h),
+                              (port.x, port.y, port.w, port.h))
+            elif ev[0] == EV_COPY_RECT:
                 srcx, srcy, x, y, width, height = ev[1]
+                texture = factory.from_surface(window.get_surface())
+                renderer.copy(texture, (srcx, srcy, width,
+                                        height), (x, y, width, height))
+            elif ev[0] == EV_FILL_RECT:
+                port, color = ev[1]
+                pcolor = sdl2.pixels.SDL_MapRGBA(pformat, color.r, color.g, color.b, color.a)
+                renderer.fill(port, pcolor)
 
         if need_update:
-            render.SDL_RenderCopy(renderer, texture, vport, vport)
-            render.SDL_RenderPresent(renderer)
+            in_present = True
+            renderer.present()
 
         events = sdl2.ext.get_events()
         for event in events:
@@ -144,8 +161,8 @@ async def run_gui(window, renderer, client):
                 running = False
                 break
 
-            if texture is None:
-                break
+            if in_present is False:
+                continue
 
             if event.type == sdl2.SDL_MOUSEMOTION:
                 x = event.motion.x
@@ -188,13 +205,17 @@ async def run_gui(window, renderer, client):
 async def main():
     option = Option()
 
-    window, renderer = load_gui(option)
+    window = load_gui(option)
 
     loop = asyncio.get_running_loop()
-    client = VNCClient(loop, option, renderer)
+
+    flags = sdl2.render.SDL_RENDERER_SOFTWARE
+    renderer = sdl2.ext.Renderer(window, flags=flags)
+
+    client = VNCClient(loop, renderer, option)
     transport, protocol = await loop.create_connection(
         lambda: client,
-        '127.0.0.1', 5900)
+        option.host, option.port)
 
     await run_gui(window, renderer, client)
 
